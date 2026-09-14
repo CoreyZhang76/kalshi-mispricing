@@ -1,0 +1,41 @@
+# Copy to config/markets.yaml and edit. markets.yaml is gitignored so that a
+# personal tracking list does not end up in the repo.
+#
+# `tickers` is anything you want collected. `linked_sets` additionally declares
+# which markets you believe are economically tied together and by what rule.
+# Every ticker named in a linked set is collected automatically.
+#
+# The `relation` values below are placeholders. Phase 1 is where we work out
+# which of these actually hold on real Kalshi contracts and what the exact
+# bound is, so do not trust this file until that is done.
+
+collection:
+  tier: basic            # your Kalshi API tier, sets the rate limit budget
+  rest_poll_seconds: 60  # full-book REST poll, used to audit the websocket book
+  record_raw: true       # also write every raw websocket message to data/raw/
+
+tickers: []
+
+linked_sets:
+  # A ladder over the same underlying number. "above 3.0%" must be at least as
+  # likely as "above 3.1%", so P(lower strike) >= P(higher strike) at every point
+  # in time. A violation is a monotonicity arbitrage.
+  # - name: cpi-may-ladder
+  #   relation: monotone_ladder
+  #   tickers: [KXCPI-26MAY-T2.9, KXCPI-26MAY-T3.0, KXCPI-26MAY-T3.1]
+  #   params: {strikes: [2.9, 3.0, 3.1]}
+  #   notes: strictly increasing strikes on the same release
+
+  # A partition: exactly one of these outcomes occurs, so the YES prices must sum
+  # to 1 dollar. Buying every leg costs sum(asks) and pays exactly $1.
+  # - name: fed-june-decision
+  #   relation: partition
+  #   tickers: [...]
+  #   notes: mutually exclusive and collectively exhaustive bucket set
+
+  # Same question, two horizons. "by March" implies "by June", so
+  # P(by earlier date) <= P(by later date).
+  # - name: some-event-by-date
+  #   relation: nested_deadline
+  #   tickers: [...]
+  #   params: {order: [earlier_ticker, later_ticker]}
