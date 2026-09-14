@@ -145,6 +145,24 @@ class KalshiREST:
         )
         return list(items)
 
+    async def get_event(self, event_ticker: str, with_nested_markets: bool = True) -> dict:
+        """One event plus, optionally, its markets in a single call.
+
+        Returns {"event": {...}, "markets": [...]}. The event object carries
+        `mutually_exclusive`, and the markets carry `strike_type` and their
+        strike bounds, which together are everything kmm/linkage.py needs to
+        infer the no-arbitrage relations without reading any contract prose.
+        """
+        data = await self.get(
+            f"/events/{event_ticker}",
+            {"with_nested_markets": str(with_nested_markets).lower()},
+        )
+        event = data.get("event", data)
+        # Kalshi returns the markets nested under the event when asked, but has
+        # also returned them alongside it, so accept either shape.
+        markets = data.get("markets") or event.get("markets") or []
+        return {"event": event, "markets": markets}
+
     async def get_markets(self, event_ticker: str | None = None, series_ticker: str | None = None,
                           status: str | None = None, tickers: list[str] | None = None,
                           limit: int = 200, **extra) -> list[dict]:

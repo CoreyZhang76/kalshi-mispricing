@@ -1,7 +1,7 @@
 # Kalshi Cross-Market Mispricing Scanner
 
 **Corey Zhang** | [github.com/CoreyZhang76/kalshi-mispricing](https://github.com/CoreyZhang76/kalshi-mispricing)
-Personal project, September 2026. Status: Phase 0 of 4 complete, no findings yet.
+Personal project, September 2026. Status: Phases 0 and 1 complete, no findings yet.
 
 ---
 
@@ -62,7 +62,7 @@ Three design decisions worth defending in an interview:
   because ours includes our own network delay and would make the market look slower
   to self-correct than it is.
 
-## Built so far (Phase 0)
+## Built so far (Phases 0 and 1)
 
 | Module | Purpose |
 |---|---|
@@ -73,6 +73,8 @@ Three design decisions worth defending in an interview:
 | `book.py` | Book rebuilt from snapshot plus deltas, with gap detection |
 | `ws.py` | WebSocket collector with reconnect and raw message capture |
 | `storage.py` | SQLite schema with run provenance and data-quality tracking |
+| `linkage.py` | Infers linked sets from strike metadata (Phase 1) |
+| `relations.py` | No-arbitrage bounds, checked on executable prices (Phase 1) |
 
 `scripts/selftest.py` runs offline with no credentials. It verifies signatures the
 way Kalshi's server would, and walks a book through a snapshot and four deltas to
@@ -81,8 +83,8 @@ lifts shrink a level, and that a full cancel makes the ask widen to the next lev
 
 ## Not done yet
 
-Phases 1 to 4: identifying linked market sets, the fee-aware scanner, calibration
-and Brier scoring, and the write-up. **No live data has been collected and there
+Phases 2 to 4: the fee-aware scanner, calibration and Brier scoring, and the
+write-up. **No live data has been collected and there
 are no results.** Everything above is validated against Kalshi's published OpenAPI
 and AsyncAPI specifications plus offline tests, not against live traffic.
 

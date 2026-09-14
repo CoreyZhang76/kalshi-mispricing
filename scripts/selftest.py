@@ -10,6 +10,7 @@ bucket's pacing.
 from __future__ import annotations
 
 import asyncio
+import math
 import base64
 import sys
 import time
@@ -22,8 +23,10 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from kmm.auth import KalshiSigner
 from kmm.book import OrderBook, SequenceTracker
+from kmm.linkage import Interval, infer_sets, implication_pairs, market_interval, tiles_the_line
 from kmm.prices import dollars_to_cents, implied_probability, parse_levels
 from kmm.ratelimit import TokenBucket, read_bucket
+from kmm.relations import Quote, check_complement, check_implication, check_ladder, check_partition
 from kmm.storage import Store
 
 
@@ -167,6 +170,137 @@ def test_storage(tmp: Path) -> None:
     print("storage ok")
 
 
+def test_relations() -> None:
+    # --- complement: only fires on a crossed book, which should be impossible ---
+    assert check_complement(Quote("M", yes_bid_c=40, yes_bid_sz=10, yes_ask_c=44, yes_ask_sz=10)) is None
+    crossed = check_complement(Quote("M", yes_bid_c=46, yes_bid_sz=10, yes_ask_c=44, yes_ask_sz=7))
+    assert crossed is not None and crossed.edge_c == 2 and crossed.max_size == 7
+    # A one-sided book cannot be traded, so no relation is asserted over it.
+    assert check_complement(Quote("M", yes_bid_c=40, yes_bid_sz=10)) is None
+
+    # --- implication: "above 3.1" (sub) entails "above 3.0" (sup) ---
+    sub = Quote("CPI-T3.1", yes_bid_c=45, yes_bid_sz=20, yes_ask_c=47, yes_ask_sz=20)
+    sup = Quote("CPI-T3.0", yes_bid_c=38, yes_bid_sz=30, yes_ask_c=40, yes_ask_sz=12)
+    # Selling the narrower event at 45 while buying the wider at 40 is a 5c credit
+    # on a position that cannot lose at settlement.
+    v = check_implication(sub, sup)
+    assert v is not None and v.edge_c == 5 and v.max_size == 12  # thinnest leg caps it
+    assert v.gross_cents == 60
+    assert [leg.action for leg in v.legs] == ["buy_yes", "sell_yes"]
+
+    # Correctly ordered prices produce nothing, and the spread alone must not
+    # trigger it: mids here are 46 and 39, wrong order, yet no arbitrage exists.
+    ok_sup = Quote("CPI-T3.0", yes_bid_c=44, yes_bid_sz=30, yes_ask_c=46, yes_ask_sz=30)
+    assert check_implication(sub, ok_sup) is None
+    # Direction matters: the relation is one-way, so swapping the arguments
+    # asserts something that is not true and must not fire here.
+    assert check_implication(ok_sup, sub) is None
+
+    # --- ladder: a violation between non-adjacent rungs must be caught ---
+    ladder = [
+        Quote("T3.2", yes_bid_c=30, yes_bid_sz=10, yes_ask_c=32, yes_ask_sz=10),  # narrowest
+        Quote("T3.1", yes_bid_c=33, yes_bid_sz=10, yes_ask_c=35, yes_ask_sz=10),
+        Quote("T3.0", yes_bid_c=26, yes_bid_sz=10, yes_ask_c=28, yes_ask_sz=10),  # widest
+    ]
+    found = check_ladder(ladder, set_name="cpi")
+    # Adjacent steps 0->1 are fine (30 bid vs 35 ask). The breaks are against the
+    # widest rung, whose 28 ask sits below both narrower bids.
+    edges = sorted(v.edge_c for v in found)
+    assert edges == [2.0, 5.0], edges
+
+    # --- partition, exhaustive: both bounds apply ---
+    cheap = [Quote(f"B{i}", yes_bid_c=28, yes_bid_sz=5, yes_ask_c=30, yes_ask_sz=5) for i in range(3)]
+    found = check_partition(cheap, exhaustive=True, set_name="buckets")
+    assert len(found) == 1 and found[0].relation == "partition_underround"
+    assert found[0].edge_c == 10 and found[0].max_size == 5  # asks sum to 90c
+
+    rich = [Quote(f"B{i}", yes_bid_c=36, yes_bid_sz=4, yes_ask_c=38, yes_ask_sz=4) for i in range(3)]
+    found = check_partition(rich, exhaustive=True, set_name="buckets")
+    assert len(found) == 1 and found[0].relation == "partition_overround"
+    assert found[0].edge_c == 8  # bids sum to 108c
+
+    # --- partition, exclusive but NOT exhaustive: only the upper bound holds ---
+    # This is the case that manufactures fake arbitrage if handled carelessly.
+    # Asks summing to 90c is correct pricing for a 10% chance of "none of these".
+    found = check_partition(cheap, exhaustive=False, set_name="buckets")
+    assert found == [], "underround must not be flagged without exhaustiveness"
+    found = check_partition(rich, exhaustive=False, set_name="buckets")
+    assert len(found) == 1 and found[0].relation == "partition_overround"
+
+    # A fairly priced exhaustive set produces nothing either way.
+    fair = [Quote(f"B{i}", yes_bid_c=32, yes_bid_sz=5, yes_ask_c=34, yes_ask_sz=5) for i in range(3)]
+    assert check_partition(fair, exhaustive=True) == []
+    print("relations ok")
+
+
+def test_linkage() -> None:
+    def mkt(ticker, strike_type, floor=None, cap=None):
+        return {"ticker": ticker, "strike_type": strike_type,
+                "floor_strike": floor, "cap_strike": cap}
+
+    # --- intervals read off the metadata, not off the title text ---
+    assert market_interval(mkt("A", "greater", floor=3.0)) == Interval("A", 3.0, math.inf, "greater")
+    assert market_interval(mkt("B", "less", cap=2.9)) == Interval("B", -math.inf, 2.9, "less")
+    assert market_interval(mkt("C", "between", floor=2.9, cap=3.0)).high == 3.0
+    # Strike types whose settlement we cannot read are skipped, not guessed at.
+    assert market_interval(mkt("D", "functional")) is None
+    assert market_interval(mkt("E", "greater")) is None  # required bound missing
+
+    # --- implication direction on a "greater" ladder ---
+    ivs = [market_interval(mkt(f"T{s}", "greater", floor=s)) for s in (3.0, 3.1, 3.2)]
+    pairs = implication_pairs(ivs)
+    # A higher threshold is the harder event, so it entails every lower one.
+    assert ("T3.2", "T3.0") in pairs and ("T3.1", "T3.0") in pairs
+    assert ("T3.0", "T3.1") not in pairs  # never the other way round
+    assert len(pairs) == 3
+
+    # --- exhaustiveness, shared-edge convention ---
+    shared = [Interval("a", -math.inf, 2.9, "less"), Interval("b", 2.9, 3.0, "between"),
+              Interval("c", 3.0, math.inf, "greater")]
+    assert tiles_the_line(shared) is True
+    # --- offset-grid convention: contiguous in intent, one grid step apart ---
+    offset = [Interval("a", -math.inf, 2.9, "less"), Interval("b", 3.0, 3.1, "between"),
+              Interval("c", 3.2, math.inf, "greater")]
+    assert tiles_the_line(offset) is True
+    # --- a genuinely missing bucket is a two-step gap and must be rejected ---
+    missing = [Interval("a", -math.inf, 2.9, "less"), Interval("b", 3.2, math.inf, "greater")]
+    assert tiles_the_line(missing) is False
+    # --- open at one end, so some outcome is uncovered ---
+    assert tiles_the_line([Interval("a", 2.9, 3.0, "between"),
+                           Interval("b", 3.0, math.inf, "greater")]) is False
+    # --- overlapping buckets could pay out together ---
+    assert tiles_the_line([Interval("a", -math.inf, 3.1, "less"),
+                           Interval("b", 3.0, math.inf, "greater")]) is False
+
+    # --- end to end: an exclusive, tiling event is an exhaustive partition ---
+    event = {"event_ticker": "CPI-26MAY", "mutually_exclusive": True}
+    markets = [mkt("a", "less", cap=2.9), mkt("b", "between", floor=2.9, cap=3.0),
+               mkt("c", "greater", floor=3.0)]
+    sets = infer_sets(event, markets)
+    assert len(sets) == 1 and sets[0].relation == "partition" and sets[0].exhaustive is True
+
+    # --- exclusive with a hole: falls back to the weaker bound ---
+    holey = [mkt("a", "less", cap=2.9), mkt("b", "greater", floor=3.9)]
+    sets = infer_sets(event, holey)
+    assert len(sets) == 1 and sets[0].exhaustive is False
+
+    # --- Kalshi's flag contradicted by the geometry: refuse both bounds ---
+    contradictory = [mkt("a", "less", cap=3.1), mkt("b", "greater", floor=3.0)]
+    sets = infer_sets(event, contradictory)
+    assert len(sets) == 1 and sets[0].exhaustive is False and "SKIP" in sets[0].notes
+
+    # --- non-exclusive event with nested strikes is a ladder, ordered narrow to wide ---
+    ladder_event = {"event_ticker": "CPI-26MAY-LADDER", "mutually_exclusive": False}
+    rungs = [mkt(f"T{s}", "greater", floor=s) for s in (3.0, 3.1, 3.2)]
+    sets = infer_sets(ladder_event, rungs)
+    assert len(sets) == 1 and sets[0].relation == "ladder"
+    assert sets[0].tickers == ["T3.2", "T3.1", "T3.0"]
+
+    # --- an event with nothing readable produces nothing, rather than a guess ---
+    assert infer_sets(ladder_event, [mkt("x", "custom"), mkt("y", "structured")]) == []
+    print("linkage ok")
+
+
 def main() -> int:
     tmp = Path(__file__).resolve().parents[1] / "data" / "_selftest"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -177,6 +311,8 @@ def main() -> int:
     test_book()
     test_sequence()
     test_signing()
+    test_relations()
+    test_linkage()
     asyncio.run(test_bucket())
     test_storage(tmp)
     print("\nall offline tests passed")

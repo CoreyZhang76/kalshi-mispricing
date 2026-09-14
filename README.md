@@ -15,7 +15,7 @@ is not the same thing as a realised one.
 | Phase | What it does | State |
 |---|---|---|
 | 0 | API client, rate limiting, collector, storage | done |
-| 1 | Identify linked market sets and their no-arbitrage rules | not started |
+| 1 | Identify linked market sets and their no-arbitrage rules | done |
 | 2 | Mispricing scanner with fee-aware thresholds, duration tracking | not started |
 | 3 | Calibration and Brier score on resolved markets | not started |
 | 4 | Report and limitations | not started |
@@ -59,6 +59,13 @@ Find markets worth tracking:
 .venv/Scripts/python.exe scripts/discover_markets.py --candidates --min-volume 5000
 ```
 
+See which no-arbitrage relations actually hold in a series, and get a config block
+for them:
+
+```bash
+.venv/Scripts/python.exe scripts/discover_markets.py --series KXCPI --linkage --emit-yaml
+```
+
 Copy `config/markets.example.yaml` to `config/markets.yaml`, fill in the tickers,
 then collect:
 
@@ -82,6 +89,8 @@ src/kmm/
   ws.py          websocket collector with gap detection and reconnect
   storage.py     SQLite schema and writers
   collect.py     entrypoint: websocket feed plus a REST audit poll
+  linkage.py     infers linked sets from strike metadata
+  relations.py   the no-arbitrage bounds and their violations
 scripts/
   selftest.py         offline tests, no credentials needed
   check_auth.py       credential and signature smoke test
@@ -102,3 +111,25 @@ arbitrage. Any analysis window overlapping a gap needs excluding.
 The collector also polls the full book over REST once a minute and compares the
 top of book against its websocket reconstruction. Mismatches go to `feed_gaps`
 with kind `rest_error`. That check exists to catch our own bugs, not Kalshi's.
+
+## How linked sets are decided
+
+Linked sets are inferred from Kalshi's metadata, not hand-declared. Events carry a
+`mutually_exclusive` flag and markets carry `strike_type` with `floor_strike` and
+`cap_strike`, so each market is an interval of the real line and the relations
+follow from set theory rather than from reading contract titles.
+
+This matters for the result, not just for convenience. If I hand-pick which markets
+"should" be related, I am choosing the hypothesis after seeing the prices, and any
+violation I find is partly an artefact of that choice.
+
+Two places the code deliberately refuses to conclude anything:
+
+- A set is only treated as an exhaustive partition when its intervals provably tile
+  the whole line. `mutually_exclusive` means *at most* one market resolves yes, not
+  *exactly* one. For an exclusive but non-exhaustive set, YES prices summing to less
+  than $1 is correct pricing for "none of these happen", not an arbitrage, so only
+  the upper bound is enforceable.
+- `functional`, `custom` and `structured` strike types are skipped. Their settlement
+  is defined by a formula or by prose, so the relation cannot be established from
+  metadata and guessing would be worse than abstaining.

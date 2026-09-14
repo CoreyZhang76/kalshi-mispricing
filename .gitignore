@@ -1,9 +1,9 @@
 .venv/
 __pycache__/
 *.pyc
-data/*.sqlite
-data/*.sqlite-journal
-data/raw/
+# Everything collected or generated locally. The nested-path form matters:
+# "data/*.sqlite" does not match "data/_selftest/selftest.sqlite".
+data/
 config/markets.yaml
 config/secrets.env
 *.pem

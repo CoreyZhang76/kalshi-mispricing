@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from kmm.auth import KalshiSigner
 from kmm.config import load_credentials
+from kmm.linkage import infer_sets, market_interval
 from kmm.rest import KalshiREST
 
 
@@ -107,12 +108,65 @@ async def candidates(rest: KalshiREST, min_volume: int, min_markets: int, top: i
     print(f"\n{len(rows)} events matched. Inspect one with --series <SERIES_TICKER>.")
 
 
+async def linkage(rest: KalshiREST, series_ticker: str, emit_yaml: bool) -> None:
+    """Report the no-arbitrage relations that actually hold in a series.
+
+    This reads Kalshi's own `mutually_exclusive` flag and each market's strike
+    bounds, so the linked sets are inferred rather than asserted by me. That
+    matters for the result: if I hand-pick which markets "should" be related, I
+    am choosing the hypothesis after seeing the prices, and any violation I find
+    is partly a product of that choice.
+    """
+    events = await rest.get_events(series_ticker=series_ticker, status="open")
+    if not events:
+        print(f"no open events in {series_ticker}")
+        return
+
+    all_sets = []
+    for event in events:
+        event_ticker = event.get("event_ticker")
+        detail = await rest.get_event(event_ticker)
+        found = infer_sets(detail["event"], detail["markets"])
+        all_sets.extend(found)
+        exclusive = detail["event"].get("mutually_exclusive")
+        print(f"\n--- {event_ticker}  markets={len(detail['markets'])}  mutually_exclusive={exclusive}")
+        for iv in (market_interval(m) for m in detail["markets"]):
+            if iv is not None:
+                print(f"      {iv}  ({iv.strike_type})")
+        if not found:
+            print("      no testable relation inferred")
+        for s in found:
+            print(f"   => {s}")
+
+    testable = [s for s in all_sets if "SKIP" not in s.notes]
+    exhaustive = [s for s in testable if s.relation == "partition" and s.exhaustive]
+    print(f"\n{len(testable)} testable set(s): {len(exhaustive)} exhaustive partition(s), "
+          f"{sum(1 for s in testable if s.relation == 'ladder')} ladder(s), "
+          f"{len(testable) - len(exhaustive) - sum(1 for s in testable if s.relation == 'ladder')} "
+          "exclusive-only partition(s)")
+
+    if emit_yaml:
+        print("\n# --- paste into config/markets.yaml ---")
+        print("linked_sets:")
+        for s in testable:
+            print(f"  - name: {s.name}")
+            print(f"    relation: {s.relation}")
+            print(f"    tickers: [{', '.join(s.tickers)}]")
+            if s.relation == "partition":
+                print(f"    params: {{exhaustive: {str(s.exhaustive).lower()}}}")
+            print(f"    notes: {s.notes}")
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Explore Kalshi markets to decide what to track.")
     parser.add_argument("--list-series", action="store_true")
     parser.add_argument("--category", default=None)
     parser.add_argument("--series", default=None)
     parser.add_argument("--candidates", action="store_true")
+    parser.add_argument("--linkage", action="store_true",
+                        help="with --series: infer no-arbitrage relations from strike metadata")
+    parser.add_argument("--emit-yaml", action="store_true",
+                        help="with --linkage: print a linked_sets block for markets.yaml")
     parser.add_argument("--min-volume", type=int, default=1000)
     parser.add_argument("--min-markets", type=int, default=2)
     parser.add_argument("--top", type=int, default=40)
@@ -123,6 +177,8 @@ async def main() -> None:
     async with KalshiREST(signer, env=creds.env) as rest:
         if args.list_series:
             await list_series(rest, args.category)
+        elif args.series and args.linkage:
+            await linkage(rest, args.series, args.emit_yaml)
         elif args.series:
             await show_series(rest, args.series)
         elif args.candidates:
