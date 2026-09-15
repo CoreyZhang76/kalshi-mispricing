@@ -1,7 +1,7 @@
 # Kalshi Cross-Market Mispricing Scanner
 
 **Corey Zhang** | [github.com/CoreyZhang76/kalshi-mispricing](https://github.com/CoreyZhang76/kalshi-mispricing)
-Personal project, September 2026. Status: Phases 0 and 1 complete, no findings yet.
+Personal project, September 2026. Status: Phases 0 to 2 complete, no live data collected yet.
 
 ---
 
@@ -62,7 +62,7 @@ Three design decisions worth defending in an interview:
   because ours includes our own network delay and would make the market look slower
   to self-correct than it is.
 
-## Built so far (Phases 0 and 1)
+## Built so far (Phases 0 to 2)
 
 | Module | Purpose |
 |---|---|
@@ -75,6 +75,8 @@ Three design decisions worth defending in an interview:
 | `storage.py` | SQLite schema with run provenance and data-quality tracking |
 | `linkage.py` | Infers linked sets from strike metadata (Phase 1) |
 | `relations.py` | No-arbitrage bounds, checked on executable prices (Phase 1) |
+| `fees.py` | Kalshi's quadratic fee, which sets the minimum real edge (Phase 2) |
+| `scanner.py` | Replays books, flags fee-clearing violations, times them (Phase 2) |
 
 `scripts/selftest.py` runs offline with no credentials. It verifies signatures the
 way Kalshi's server would, and walks a book through a snapshot and four deltas to
@@ -83,8 +85,7 @@ lifts shrink a level, and that a full cancel makes the ask widen to the next lev
 
 ## Not done yet
 
-Phases 2 to 4: the fee-aware scanner, calibration and Brier scoring, and the
-write-up. **No live data has been collected and there
+Phases 3 and 4: calibration and Brier scoring, and the write-up. **No live data has been collected and there
 are no results.** Everything above is validated against Kalshi's published OpenAPI
 and AsyncAPI specifications plus offline tests, not against live traffic.
 
@@ -97,6 +98,12 @@ and AsyncAPI specifications plus offline tests, not against live traffic.
   illiquid ones because they look mispriced, I will find mispricings that are really
   just stale quotes.
 - **Paper fills are not fills.** See scope above.
-- **Fees set the floor.** Kalshi's fee is a function of price, largest near 50c.
-  A violation smaller than the round-trip fee is not an opportunity, it is noise,
-  and the scanner has to threshold on that rather than on zero.
+- **Fees set the floor, and it is high.** Kalshi charges
+  `round_up_to_cent(0.07 * M * C * P * (1 - P))` per leg, peaking at 50c. A
+  three-leg partition around 33c each costs about 4.65c per contract to enter
+  against a 1c tick, so a set summing to 98c looks like a 2c arbitrage and is a
+  2.6c loss. The scanner thresholds on net-of-fees, not on zero.
+- **Duration is measured in episodes, not detections.** A violation is an
+  interval, and counting book updates while it stood would turn one 30-second
+  mispricing into hundreds of "opportunities". Episodes still open when the data
+  ends are reported separately, since they lasted *at least* that long.

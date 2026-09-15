@@ -23,10 +23,13 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from kmm.auth import KalshiSigner
 from kmm.book import OrderBook, SequenceTracker
-from kmm.linkage import Interval, infer_sets, implication_pairs, market_interval, tiles_the_line
+from kmm.fees import FeeModel, net_edge_cents, round_trip_threshold_cents
+from kmm.linkage import (Interval, InferredSet, infer_sets, implication_pairs,
+                         market_interval, tiles_the_line)
 from kmm.prices import dollars_to_cents, implied_probability, parse_levels
 from kmm.ratelimit import TokenBucket, read_bucket
 from kmm.relations import Quote, check_complement, check_implication, check_ladder, check_partition
+from kmm.scanner import Scanner, summarise
 from kmm.storage import Store
 
 
@@ -301,6 +304,123 @@ def test_linkage() -> None:
     print("linkage ok")
 
 
+def test_fees() -> None:
+    model = FeeModel()
+    # 0.07 * 100 * 0.50 * 0.50 = $1.75 on 100 contracts at the worst price.
+    assert model.taker_fee_cents(100, 50) == 175
+    # Quadratic, so the tails are far cheaper: 0.07 * 100 * 0.05 * 0.95 = $0.3325.
+    assert model.taker_fee_cents(100, 5) == 34  # rounded up to a whole cent
+    # Symmetric in P and 1-P, which is why selling YES costs the same as buying
+    # the NO it is equivalent to, and why the YES price alone determines the fee.
+    assert model.taker_fee_cents(100, 45) == model.taker_fee_cents(100, 55)
+    # Rounding is per ORDER, so small size pays proportionally more: a single
+    # contract at 50c owes 1.75c in theory and is charged 2c.
+    assert model.taker_fee_cents(1, 50) == 2
+    assert model.taker_fee_cents(0, 50) == 0
+    # The series multiplier scales it linearly.
+    assert FeeModel(multiplier=2.0).taker_fee_cents(100, 50) == 350
+    # A flat-schedule series must refuse rather than apply the wrong formula.
+    try:
+        FeeModel(fee_type="flat").taker_fee_cents(100, 50)
+    except NotImplementedError:
+        pass
+    else:
+        raise AssertionError("flat fee series should not silently use the quadratic formula")
+
+    # The headline threshold: three legs around 33c cost ~4.65c per contract to
+    # enter, so a partition summing to 98c is NOT a 2c opportunity.
+    legs = [33, 33, 33]
+    assert round_trip_threshold_cents(legs, 100, model) == 465
+    assert net_edge_cents(2.0, legs, 100, model) == -265  # sum 98c: a loss
+    assert net_edge_cents(5.0, legs, 100, model) == 35    # sum 95c: barely worth it
+    # Maker fees are a fraction of taker, and zero on the plain quadratic series.
+    assert model.maker_fee_cents(100, 50) == 0
+    assert FeeModel(fee_type="quadratic_with_maker_fees").maker_fee_cents(100, 50) == 44
+    print("fees ok")
+
+
+def test_scanner() -> None:
+    iset = InferredSet(name="buckets", relation="partition",
+                       tickers=["A", "B", "C"], exhaustive=True)
+
+    def q(ticker, bid, ask, size=5.0):
+        return Quote(ticker, yes_bid_c=bid, yes_bid_sz=size, yes_ask_c=ask, yes_ask_sz=size)
+
+    scanner = Scanner([iset], FeeModel())
+    # Asks at 30 each sum to 90c on an exhaustive set: a 10c/contract underround.
+    # Nothing can fire until all three legs have quotes.
+    scanner.update(q("A", 28, 30), 1000)
+    assert not scanner.open, "a set with missing legs must not be evaluated"
+    scanner.update(q("B", 28, 30), 1100)
+    assert not scanner.open
+    scanner.update(q("C", 28, 30), 1200)
+    assert len(scanner.open) == 1
+
+    # More updates while it still violates extend the same episode rather than
+    # opening new ones. This is the difference between counting opportunities
+    # and counting book updates.
+    scanner.update(q("A", 28, 30), 2000)
+    scanner.update(q("B", 28, 30), 3000)
+    assert len(scanner.open) == 1
+    assert next(iter(scanner.open.values())).n_observations == 3
+
+    # Prices correct one leg at a time. The episode must survive the partial
+    # corrections: with asks at 34/30/30 the sum is still 94c, so the violation
+    # is genuinely still standing. It closes only when the last leg moves and the
+    # sum finally clears 100c.
+    scanner.update(q("A", 32, 34), 4000)   # sum 94c, still violating
+    scanner.update(q("B", 32, 34), 4100)   # sum 98c, still violating
+    assert len(scanner.open) == 1
+    scanner.update(q("C", 32, 34), 4200)   # sum 102c, bound holds again
+    episodes = scanner.finish()
+    assert len(episodes) == 1
+    ep = episodes[0]
+    assert ep.closed is True
+    assert ep.start_ms == 1200 and ep.end_ms == 4200
+    assert ep.duration_ms == 3000
+    # 10c/contract on 5 contracts = 50c gross; fees are 3 legs x ceil(0.07*5*0.3*0.7*100)
+    # = 3 x 8c = 24c; net 26c, so this one clears.
+    assert ep.peak_gross_edge_c == 10.0 and ep.peak_size == 5.0
+    assert ep.fee_at_peak_c == 24 and ep.peak_net_c == 26
+    assert ep.clears_fees is True
+
+    # --- an episode still standing at the end of the data is not "closed" ---
+    scanner = Scanner([iset], FeeModel())
+    for t, tk in ((1000, "A"), (1100, "B"), (1200, "C")):
+        scanner.update(q(tk, 28, 30), t)
+    episodes = scanner.finish()
+    assert len(episodes) == 1 and episodes[0].closed is False
+
+    # --- a violation too small to cover fees is recorded but does not clear ---
+    # Asks at 33 sum to 99c: a 1c/contract edge against 3 x 2c of fees on 5 lots.
+    scanner = Scanner([iset], FeeModel())
+    for t, tk in ((1000, "A"), (1100, "B"), (1200, "C")):
+        scanner.update(q(tk, 31, 33), t)
+    ep = scanner.finish()[0]
+    assert ep.peak_gross_edge_c == 1.0
+    # 5 contracts x 1c = 5c gross, against 3 legs x ceil(0.07*5*0.33*0.67*100)
+    # = 3 x 8c = 24c of fees. A 19c loss dressed up as a 1c edge.
+    assert ep.fee_at_peak_c == 24
+    assert ep.peak_net_c == -19
+    assert ep.clears_fees is False, "a sub-fee violation must not count as an opportunity"
+
+    # --- episodes overlapping a feed gap are flagged, not dropped ---
+    scanner = Scanner([iset], FeeModel(), gap_windows=[(1150, 1250)])
+    for t, tk in ((1000, "A"), (1100, "B"), (1200, "C")):
+        scanner.update(q(tk, 28, 30), t)
+    assert scanner.finish()[0].spans_feed_gap is True
+
+    # --- summarise reports the honest headline when nothing clears fees ---
+    scanner = Scanner([iset], FeeModel())
+    for t, tk in ((1000, "A"), (1100, "B"), (1200, "C")):
+        scanner.update(q(tk, 31, 33), t)
+    text = summarise(scanner.finish())
+    assert "clear fees, so actually tradable: 0" in text
+    assert "fee floor doing its job" in text
+    assert "No no-arbitrage violations" in summarise([])
+    print("scanner ok")
+
+
 def main() -> int:
     tmp = Path(__file__).resolve().parents[1] / "data" / "_selftest"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -313,6 +433,8 @@ def main() -> int:
     test_signing()
     test_relations()
     test_linkage()
+    test_fees()
+    test_scanner()
     asyncio.run(test_bucket())
     test_storage(tmp)
     print("\nall offline tests passed")
