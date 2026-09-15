@@ -17,7 +17,7 @@ is not the same thing as a realised one.
 | 0 | API client, rate limiting, collector, storage | done |
 | 1 | Identify linked market sets and their no-arbitrage rules | done |
 | 2 | Mispricing scanner with fee-aware thresholds, duration tracking | done |
-| 3 | Calibration and Brier score on resolved markets | not started |
+| 3 | Calibration and Brier score on resolved markets | done |
 | 4 | Report and limitations | not started |
 
 ## Setup
@@ -82,10 +82,18 @@ Scan what was collected:
 .venv/Scripts/python.exe -m kmm.scanner --db data/kalshi.sqlite --config config/markets.yaml
 ```
 
-To see the scanner work without a Kalshi account, on generated data:
+Build the calibration dataset from markets that already resolved. This does not
+need the collector running, so it can produce a real result immediately:
+
+```bash
+.venv/Scripts/python.exe scripts/fetch_resolved.py --series KXHIGHNY --days 90
+```
+
+To see both analyses work without a Kalshi account, on generated data:
 
 ```bash
 .venv/Scripts/python.exe scripts/demo_synthetic.py
+.venv/Scripts/python.exe scripts/demo_calibration.py
 ```
 
 ## Layout
@@ -105,11 +113,15 @@ src/kmm/
   relations.py   the no-arbitrage bounds and their violations
   fees.py        Kalshi's quadratic fee, which sets the minimum real edge
   scanner.py     replays books, flags fee-clearing violations, times them
+  calibration.py reliability curves, Brier decomposition, clustered bootstrap
+  plots.py       reliability and horizon charts
 scripts/
   selftest.py         offline tests, no credentials needed
   check_auth.py       credential and signature smoke test
   discover_markets.py browse the exchange to pick tickers
-  demo_synthetic.py   runs the whole pipeline on generated data, no key needed
+  demo_synthetic.py   runs the scanner on generated data, no key needed
+  demo_calibration.py runs the calibration analysis on generated data
+  fetch_resolved.py   builds the calibration dataset from settled markets
 ```
 
 ## Notes on the data
@@ -165,3 +177,25 @@ The practical effect: a partition whose YES prices sum to 98c looks like a clean
 of "mispricings" that are really just the cost of access. The scanner records
 both the gross violation and the net-of-fees number, and only the latter counts
 as a finding.
+
+## Reading the calibration output
+
+Three numbers matter more than the Brier score on its own.
+
+**Excess reliability, not raw reliability.** Raw reliability never reaches zero on
+real data. It averages the squared gap between price and observed frequency, and
+that observed frequency is itself a finite sample, so noise alone contributes
+about `(1/N) * sum over prices of p(1-p)`. With Kalshi's 99 possible prices and
+3000 observations the floor is roughly 0.0055. Comparing raw reliability against
+zero would call a perfectly calibrated market miscalibrated, so the code computes
+the floor and reports the excess above it.
+
+**Resolution, not just Brier.** Brier falls as resolution approaches on any
+market, simply because the outcome becomes obvious. Resolution measures how far
+the market moved from the base rate while still being right, so resolution rising
+early is the evidence that it was anticipating rather than catching up.
+
+**Events, not rows.** Ten snapshots of one contract are ten rows and one outcome,
+and markets inside an event resolve together. Confidence intervals come from a
+bootstrap over events; resampling rows would treat correlated observations as
+independent and give an interval far too narrow to be honest.

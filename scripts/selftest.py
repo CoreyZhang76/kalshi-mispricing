@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import random
 import base64
 import sys
 import time
@@ -23,13 +24,18 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from kmm.auth import KalshiSigner
 from kmm.book import OrderBook, SequenceTracker
+from kmm.calibration import (Observation, brier_decomposition, brier_score, by_horizon,
+                             expected_reliability_noise,
+                             clustered_bootstrap_brier, effective_sample_note,
+                             reliability_table, summarise, wilson_interval)
 from kmm.fees import FeeModel, net_edge_cents, round_trip_threshold_cents
 from kmm.linkage import (Interval, InferredSet, infer_sets, implication_pairs,
                          market_interval, tiles_the_line)
 from kmm.prices import dollars_to_cents, implied_probability, parse_levels
 from kmm.ratelimit import TokenBucket, read_bucket
 from kmm.relations import Quote, check_complement, check_implication, check_ladder, check_partition
-from kmm.scanner import Scanner, summarise
+from kmm.scanner import Scanner
+from kmm.scanner import summarise as scanner_summarise
 from kmm.storage import Store
 
 
@@ -414,11 +420,120 @@ def test_scanner() -> None:
     scanner = Scanner([iset], FeeModel())
     for t, tk in ((1000, "A"), (1100, "B"), (1200, "C")):
         scanner.update(q(tk, 31, 33), t)
-    text = summarise(scanner.finish())
+    text = scanner_summarise(scanner.finish())
     assert "clear fees, so actually tradable: 0" in text
     assert "fee floor doing its job" in text
-    assert "No no-arbitrage violations" in summarise([])
+    assert "No no-arbitrage violations" in scanner_summarise([])
     print("scanner ok")
+
+
+def test_calibration() -> None:
+    rng = random.Random(11)
+
+    def obs(p, outcome, event="E", ticker="T", hours=1.0):
+        return Observation(ticker=ticker, event_ticker=event, ts_ms=0,
+                           implied_prob=p, outcome=outcome, hours_to_resolution=hours)
+
+    # --- Wilson interval behaves where the normal approximation does not ---
+    lo, hi = wilson_interval(0, 10)
+    assert lo == 0.0 and 0.0 < hi < 0.35, "must not extend below zero at the boundary"
+    lo, hi = wilson_interval(10, 10)
+    assert hi == 1.0 and 0.65 < lo < 1.0
+    lo, hi = wilson_interval(50, 100)
+    assert 0.40 < lo < 0.41 and 0.59 < hi < 0.60  # symmetric around 0.5
+    # More data narrows it.
+    assert (wilson_interval(500, 1000)[1] - wilson_interval(500, 1000)[0]) < (hi - lo)
+
+    # --- Brier reference points ---
+    coward = [obs(0.5, rng.randint(0, 1)) for _ in range(500)]
+    assert abs(brier_score(coward) - 0.25) < 1e-12, "always saying 50% scores exactly 0.25"
+    perfect = [obs(1.0, 1), obs(0.0, 0)]
+    assert brier_score(perfect) == 0.0
+
+    # --- the Murphy decomposition must be an identity, not an approximation ---
+    sample = []
+    for i in range(3000):
+        p = rng.randint(1, 99) / 100          # whole-cent prices, as Kalshi quotes
+        sample.append(obs(p, 1 if rng.random() < p else 0, event=f"E{i % 40}"))
+    parts = brier_decomposition(sample)
+    assert abs(parts.brier - (parts.reliability - parts.resolution + parts.uncertainty)) < 1e-12
+
+    # Raw reliability is NOT near zero even for perfectly calibrated data: with
+    # 99 possible prices and 3000 observations the finite-sample noise floor is
+    # about 0.0055, and the raw number sits right on it. Comparing raw
+    # reliability against zero would call an ideal market miscalibrated.
+    assert 0.004 < parts.reliability < 0.008, parts.reliability
+    assert abs(parts.reliability - parts.reliability_noise) < 0.002
+    assert abs(parts.reliability_excess) < 0.002, "excess must be ~0 for honest prices"
+    # Skill has a ceiling set by the question mix, not by forecaster quality.
+    # With prices drawn uniformly on [0,1], even a perfect forecaster scores
+    # E[p(1-p)] = 1/6 against an uncertainty of 1/4, so the best possible skill
+    # is (0.25 - 1/6) / 0.25 = 1/3. Expecting more than that would be expecting
+    # the forecaster to beat the irreducible randomness of the outcomes.
+    assert 0.28 < parts.skill_vs_base_rate < 0.38, parts.skill_vs_base_rate
+    assert abs(parts.brier - 1 / 6) < 0.02, "a calibrated forecaster's Brier is E[p(1-p)] = 1/6"
+
+    curve = reliability_table(sample)
+    for b in curve:
+        assert abs(b.gap) < 0.12, f"bin {b.lo}-{b.hi} drifted: gap {b.gap}"
+
+    # --- a biased market must be caught ---
+    # Longshots overpriced: the market quotes p but the truth is lower at the top
+    # end, which is the classic favourite-longshot pattern.
+    biased = []
+    for i in range(3000):
+        p = rng.randint(1, 99) / 100
+        truth = p ** 1.6                      # pulls low probabilities further down
+        biased.append(obs(p, 1 if rng.random() < truth else 0, event=f"E{i % 40}"))
+    bparts = brier_decomposition(biased)
+    assert abs(bparts.brier - (bparts.reliability - bparts.resolution + bparts.uncertainty)) < 1e-12
+    # The bias must survive subtracting the noise floor, which is the whole point
+    # of computing it: it is evidence, not sampling scatter.
+    assert bparts.reliability_excess > 0.01, bparts.reliability_excess
+    assert bparts.reliability_excess > parts.reliability_excess * 10
+    # Longshot bins should resolve yes LESS often than their price claims.
+    longshots = [b for b in reliability_table(biased) if b.hi <= 0.3]
+    assert all(b.gap < 0 for b in longshots), "longshots should underperform their price"
+
+    # --- dependence between observations ---
+    # 20 events, each priced differently and resolving as a single coin flip that
+    # every market inside it shares. This is the shape real data has: one event
+    # outcome, observed many times across its markets and across time.
+    clustered = []
+    for e in range(20):                        # 20 independent events
+        p_e = rng.randint(10, 90) / 100
+        outcome = 1 if rng.random() < p_e else 0
+        for m in range(5):                     # 5 markets each, same event outcome
+            for _ in range(10):                # each sampled 10 times
+                clustered.append(obs(p_e, outcome, event=f"EV{e}", ticker=f"EV{e}-M{m}"))
+    note = effective_sample_note(clustered)
+    assert "1000 observations" in note and "100 distinct markets" in note and "20 independent" in note
+
+    # Resampling events must give a wider interval than resampling rows, because
+    # rows pretend correlated observations are independent.
+    c_lo, c_hi = clustered_bootstrap_brier(clustered, n_resamples=300, seed=3)
+    naive = sorted(
+        brier_score([rng.choice(clustered) for _ in range(len(clustered))])
+        for _ in range(300)
+    )
+    naive_width = naive[int(0.975 * 300)] - naive[int(0.025 * 300)]
+    assert (c_hi - c_lo) > naive_width * 2, (
+        "clustering must widen the interval; if it does not, the sample size is being overstated"
+    )
+
+    # --- horizon split ---
+    horizons = by_horizon(
+        [obs(0.5, 1, hours=h) for h in (0.5, 2, 2, 100, 100, 100)],
+        horizons=[(0, 1), (1, 6), (6, 10**6)],
+    )
+    assert [label for label, _ in horizons] == ["0-1h", "1-6h", ">6h"]
+    assert [p.n for _, p in horizons] == [1, 2, 3]
+
+    # --- empty input must not raise ---
+    assert brier_decomposition([]).n == 0
+    assert "No resolved observations" in summarise([])
+    assert "reliability curve" in summarise(sample)
+    print("calibration ok")
 
 
 def main() -> int:
@@ -435,6 +550,7 @@ def main() -> int:
     test_linkage()
     test_fees()
     test_scanner()
+    test_calibration()
     asyncio.run(test_bucket())
     test_storage(tmp)
     print("\nall offline tests passed")

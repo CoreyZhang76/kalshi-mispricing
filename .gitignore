@@ -7,4 +7,6 @@ data/
 config/markets.yaml
 config/secrets.env
 *.pem
-reports/figures/
+# Figures ARE committed: they are the visual output of the project and let the
+# report render on GitHub without anyone running the code. Only the large raw
+# collection under data/ stays out.

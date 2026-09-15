@@ -1,7 +1,7 @@
 # Kalshi Cross-Market Mispricing Scanner
 
 **Corey Zhang** | [github.com/CoreyZhang76/kalshi-mispricing](https://github.com/CoreyZhang76/kalshi-mispricing)
-Personal project, September 2026. Status: Phases 0 to 2 complete, no live data collected yet.
+Personal project, September 2026. Status: Phases 0 to 3 complete, no live data collected yet.
 
 ---
 
@@ -62,7 +62,7 @@ Three design decisions worth defending in an interview:
   because ours includes our own network delay and would make the market look slower
   to self-correct than it is.
 
-## Built so far (Phases 0 to 2)
+## Built so far (Phases 0 to 3)
 
 | Module | Purpose |
 |---|---|
@@ -77,6 +77,8 @@ Three design decisions worth defending in an interview:
 | `relations.py` | No-arbitrage bounds, checked on executable prices (Phase 1) |
 | `fees.py` | Kalshi's quadratic fee, which sets the minimum real edge (Phase 2) |
 | `scanner.py` | Replays books, flags fee-clearing violations, times them (Phase 2) |
+| `calibration.py` | Reliability curves, Brier decomposition, clustered bootstrap (Phase 3) |
+| `plots.py` | Reliability and time-to-resolution charts (Phase 3) |
 
 `scripts/selftest.py` runs offline with no credentials. It verifies signatures the
 way Kalshi's server would, and walks a book through a snapshot and four deltas to
@@ -85,7 +87,7 @@ lifts shrink a level, and that a full cancel makes the ask widen to the next lev
 
 ## Not done yet
 
-Phases 3 and 4: calibration and Brier scoring, and the write-up. **No live data has been collected and there
+Phase 4: the write-up. **No live data has been collected and there
 are no results.** Everything above is validated against Kalshi's published OpenAPI
 and AsyncAPI specifications plus offline tests, not against live traffic.
 
@@ -98,6 +100,13 @@ and AsyncAPI specifications plus offline tests, not against live traffic.
   illiquid ones because they look mispriced, I will find mispricings that are really
   just stale quotes.
 - **Paper fills are not fills.** See scope above.
+- **Calibration observations are not independent.** Ten snapshots of one contract
+  are ten rows and one outcome, and markets inside an event resolve together. The
+  row count overstates the sample by roughly an order of magnitude, so intervals
+  come from a bootstrap over events and the event count is the number to quote.
+- **Raw reliability has a noise floor.** It never reaches zero on finite data, so
+  comparing it against zero would call an honest market miscalibrated. The code
+  computes the floor and reports the excess above it.
 - **Fees set the floor, and it is high.** Kalshi charges
   `round_up_to_cent(0.07 * M * C * P * (1 - P))` per leg, peaking at 50c. A
   three-leg partition around 33c each costs about 4.65c per contract to enter
