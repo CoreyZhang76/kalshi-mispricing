@@ -292,6 +292,116 @@ def effective_sample_note(obs: list[Observation]) -> str:
     )
 
 
+@dataclass
+class NullTest:
+    """Result of testing observed miscalibration against a simulated null."""
+
+    observed: float
+    null_median: float
+    null_95: float          # the 95th percentile of the null distribution
+    p_value: float
+    n_sims: int
+
+    @property
+    def detectable(self) -> bool:
+        return self.p_value < 0.05
+
+    def __str__(self) -> str:
+        return (
+            f"excess reliability {self.observed:+.4f} vs a perfectly calibrated null "
+            f"of {self.null_median:+.4f}\n  (95th percentile {self.null_95:+.4f}), "
+            f"p = {self.p_value:.3f} over {self.n_sims} simulations"
+        )
+
+
+def null_excess_test(obs: list[Observation], n_sims: int = 400, seed: int = 0) -> NullTest:
+    """Could a perfectly calibrated market have produced this much miscalibration?
+
+    Two approaches were tried before this one and both fail, which is worth
+    recording because each looks reasonable:
+
+      - Comparing excess reliability against a hand-picked constant. Reliability
+        is a squared error in probability units, so a visible bias with gaps of
+        0.05 to 0.10 lands at only a few thousandths and slips under any
+        threshold lax enough to avoid false positives on small samples.
+      - Bootstrapping the observed data by resampling events. Resampling with
+        replacement duplicates events, which changes the number of observations
+        behind each price group and therefore breaks the noise-floor correction.
+        Measured on synthetic data the bootstrap sat about +0.007 above the point
+        estimate for both an honest and a biased market, so the percentile
+        interval flagged the honest one and the bias-corrected interval missed
+        the biased one.
+
+    What works is simulating the null directly. Keep the quoted prices exactly as
+    observed, then regenerate outcomes treating each market's quoted price as the
+    truth. That is by construction a perfectly calibrated market with this
+    dataset's exact price distribution, sample sizes and repeat structure. Doing
+    it many times gives the distribution of excess reliability under perfect
+    calibration, and the observed value can be read against it.
+
+    **Pass one observation per market**, sliced at a fixed time to resolution with
+    `at_horizon`. Pooling a market's whole price path into this test destroys it,
+    and the reason is worth understanding rather than just avoiding.
+
+    Perfect calibration is a property of a forecast at a moment. A market quoted
+    at 30c a week out and 70c an hour out can be perfectly calibrated at both
+    instants, because it learned something in between. But it has only ONE
+    outcome, so there is no way to simulate a null in which both quotes are
+    simultaneously honest. Any null that draws a single outcome for the market
+    has to pick one price to draw from, and every observation quoted away from
+    that price then contributes miscalibration that the real data never had.
+
+    Measured on synthetic data, pooling made the null noisier than the observed
+    data and the test had no power at all: a heavy injected bias returned p=0.86.
+    Sliced to a single horizon the same test returns p=0.003 on 1600 observations
+    and p=0.77 on honest data.
+    """
+    if not obs:
+        return NullTest(float("nan"), float("nan"), float("nan"), float("nan"), 0)
+
+    observed = brier_decomposition(obs).reliability_excess
+
+    by_ticker: dict[str, list[Observation]] = defaultdict(list)
+    for o in obs:
+        by_ticker[o.ticker].append(o)
+
+    repeated = sum(1 for group in by_ticker.values() if len(group) > 1)
+    if repeated:
+        raise ValueError(
+            f"{repeated} market(s) appear more than once. This test needs one "
+            "observation per market: slice with at_horizon() first. See the "
+            "docstring for why pooling a price path removes all of the test's power."
+        )
+    # Each market's own mean quoted price is the probability the null draws from.
+    ticker_p = {t: sum(o.implied_prob for o in group) / len(group)
+                for t, group in by_ticker.items()}
+
+    rng = random.Random(seed)
+    null_scores = []
+    for _ in range(n_sims):
+        simulated: list[Observation] = []
+        for ticker, group in by_ticker.items():
+            outcome = 1 if rng.random() < ticker_p[ticker] else 0
+            simulated.extend(
+                Observation(o.ticker, o.event_ticker, o.ts_ms, o.implied_prob,
+                            outcome, o.hours_to_resolution)
+                for o in group
+            )
+        null_scores.append(brier_decomposition(simulated).reliability_excess)
+
+    null_scores.sort()
+    at_least_as_extreme = sum(1 for s in null_scores if s >= observed)
+    return NullTest(
+        observed=observed,
+        null_median=null_scores[len(null_scores) // 2],
+        null_95=null_scores[int(0.95 * len(null_scores))],
+        # The +1 convention keeps the p-value from ever being exactly zero, which
+        # would claim more certainty than a finite number of simulations supports.
+        p_value=(at_least_as_extreme + 1) / (n_sims + 1),
+        n_sims=n_sims,
+    )
+
+
 def clustered_bootstrap_brier(obs: list[Observation], n_resamples: int = 1000,
                               seed: int = 0) -> tuple[float, float]:
     """95% interval for the Brier score, resampling EVENTS rather than rows.
@@ -323,6 +433,23 @@ def clustered_bootstrap_brier(obs: list[Observation], n_resamples: int = 1000,
 # ---------------------------------------------------------------------------
 
 DEFAULT_HORIZONS = [(0, 1), (1, 6), (6, 24), (24, 72), (72, 168), (168, 10**6)]
+
+
+def at_horizon(obs: list[Observation], hours: float) -> list[Observation]:
+    """One observation per market: the one closest to `hours` before resolution.
+
+    Calibration is a property of a forecast at a moment, so it has to be measured
+    at a fixed lead time. This also makes the sample honest: one market, one
+    outcome, one row, so the row count finally means what it appears to mean.
+    """
+    best: dict[str, Observation] = {}
+    for o in obs:
+        current = best.get(o.ticker)
+        if current is None or abs(o.hours_to_resolution - hours) < abs(
+            current.hours_to_resolution - hours
+        ):
+            best[o.ticker] = o
+    return list(best.values())
 
 
 def by_horizon(obs: list[Observation],

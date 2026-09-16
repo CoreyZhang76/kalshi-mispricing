@@ -18,7 +18,7 @@ is not the same thing as a realised one.
 | 1 | Identify linked market sets and their no-arbitrage rules | done |
 | 2 | Mispricing scanner with fee-aware thresholds, duration tracking | done |
 | 3 | Calibration and Brier score on resolved markets | done |
-| 4 | Report and limitations | not started |
+| 4 | Report generator and limitations | done (generator); findings pending data |
 
 ## Setup
 
@@ -76,6 +76,12 @@ then collect:
 Ctrl-C to stop. Data lands in `data/kalshi.sqlite`, raw websocket messages in
 `data/raw/`.
 
+Build the report:
+
+```bash
+.venv/Scripts/python.exe scripts/build_report.py
+```
+
 Scan what was collected:
 
 ```bash
@@ -122,6 +128,7 @@ scripts/
   demo_synthetic.py   runs the scanner on generated data, no key needed
   demo_calibration.py runs the calibration analysis on generated data
   fetch_resolved.py   builds the calibration dataset from settled markets
+  build_report.py     generates reports/REPORT.md from whatever data exists
 ```
 
 ## Notes on the data
@@ -199,3 +206,23 @@ early is the evidence that it was anticipating rather than catching up.
 and markets inside an event resolve together. Confidence intervals come from a
 bootstrap over events; resampling rows would treat correlated observations as
 independent and give an interval far too narrow to be honest.
+
+**A fixed lead time, not a pooled price path.** Calibration is a property of a
+forecast at a moment. A market quoted at 30c a week out and 70c an hour out can be
+honest at both instants, but it has only one outcome, so no null hypothesis can
+treat both quotes as simultaneously correct. The significance test therefore runs
+on one observation per market, sliced at a fixed horizon. Pooling the path removed
+all of the test's power on synthetic data: a heavy injected bias returned p=0.86
+pooled and p=0.003 sliced.
+
+**Significance comes from a simulated null, not a threshold.** Two earlier
+approaches failed and both looked reasonable. A fixed cutoff on excess reliability
+cannot work, because reliability is a squared error in probability units, so a
+visible bias with gaps of 0.05 to 0.10 lands at a few thousandths. Bootstrapping
+the observed data fails too, because resampling events with replacement changes
+the number of observations behind each price group and breaks the noise-floor
+correction: measured on synthetic data it sat about +0.007 above the point
+estimate for honest and biased markets alike, flagging the honest one and missing
+the biased one. What works is regenerating outcomes from the observed prices,
+which is by construction a perfectly calibrated market with this dataset's exact
+shape, and reading the observed value against that distribution.

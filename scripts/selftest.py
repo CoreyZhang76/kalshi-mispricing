@@ -24,8 +24,8 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from kmm.auth import KalshiSigner
 from kmm.book import OrderBook, SequenceTracker
-from kmm.calibration import (Observation, brier_decomposition, brier_score, by_horizon,
-                             expected_reliability_noise,
+from kmm.calibration import (Observation, at_horizon, brier_decomposition, brier_score,
+                             by_horizon, expected_reliability_noise, null_excess_test,
                              clustered_bootstrap_brier, effective_sample_note,
                              reliability_table, summarise, wilson_interval)
 from kmm.fees import FeeModel, net_edge_cents, round_trip_threshold_cents
@@ -529,8 +529,43 @@ def test_calibration() -> None:
     assert [label for label, _ in horizons] == ["0-1h", "1-6h", ">6h"]
     assert [p.n for _, p in horizons] == [1, 2, 3]
 
+    # --- fixed-horizon slicing: one observation per market ---
+    path = [obs(0.3, 1, ticker="M1", hours=h) for h in (0.5, 11, 50)]
+    path += [obs(0.4, 0, ticker="M2", hours=h) for h in (2, 13, 90)]
+    sliced = at_horizon(path, 12)
+    assert len(sliced) == 2, "one observation per market"
+    assert sorted(o.hours_to_resolution for o in sliced) == [11, 13], "closest to the target"
+
+    # --- the null test must refuse pooled price paths ---
+    # Pooling removes all of its power, so this is an error rather than a warning.
+    try:
+        null_excess_test(path, n_sims=10)
+    except ValueError as exc:
+        assert "one observation per market" in str(exc)
+    else:
+        raise AssertionError("null_excess_test must reject repeated markets")
+
+    # --- power: honest data is not flagged, a real bias is ---
+    def single_horizon(shrink, n_markets, seed):
+        r = random.Random(seed)
+        out = []
+        for i in range(n_markets):
+            true_p = r.random()
+            quoted = min(0.99, max(0.01, round(0.5 + (true_p - 0.5) * shrink, 2)))
+            out.append(obs(quoted, 1 if r.random() < true_p else 0,
+                           event=f"E{i // 4}", ticker=f"M{i}", hours=12))
+        return out
+
+    honest = null_excess_test(single_horizon(1.0, 1600, 21), n_sims=200, seed=1)
+    assert not honest.detectable, f"honest data must not be flagged, got p={honest.p_value}"
+    biased = null_excess_test(single_horizon(0.6, 1600, 21), n_sims=200, seed=1)
+    assert biased.detectable, f"a substantial bias must be caught, got p={biased.p_value}"
+    # The p-value can never be exactly zero on a finite number of simulations.
+    assert biased.p_value >= 1 / 201
+
     # --- empty input must not raise ---
     assert brier_decomposition([]).n == 0
+    assert null_excess_test([]).n_sims == 0
     assert "No resolved observations" in summarise([])
     assert "reliability curve" in summarise(sample)
     print("calibration ok")

@@ -1,7 +1,7 @@
 # Kalshi Cross-Market Mispricing Scanner
 
 **Corey Zhang** | [github.com/CoreyZhang76/kalshi-mispricing](https://github.com/CoreyZhang76/kalshi-mispricing)
-Personal project, September 2026. Status: Phases 0 to 3 complete, no live data collected yet.
+Personal project, September 2026. Status: pipeline complete through Phase 4. No live data collected, so there are no findings yet.
 
 ---
 
@@ -62,7 +62,7 @@ Three design decisions worth defending in an interview:
   because ours includes our own network delay and would make the market look slower
   to self-correct than it is.
 
-## Built so far (Phases 0 to 3)
+## Built so far
 
 | Module | Purpose |
 |---|---|
@@ -80,6 +80,10 @@ Three design decisions worth defending in an interview:
 | `calibration.py` | Reliability curves, Brier decomposition, clustered bootstrap (Phase 3) |
 | `plots.py` | Reliability and time-to-resolution charts (Phase 3) |
 
+Plus `scripts/build_report.py`, which generates the results document from whatever
+data exists, choosing its headline sentences from the numbers rather than from a
+template, and refusing to describe a synthetic run as a finding.
+
 `scripts/selftest.py` runs offline with no credentials. It verifies signatures the
 way Kalshi's server would, and walks a book through a snapshot and four deltas to
 confirm that a NO bid at 56c correctly reads as a YES offer at 44c, that partial
@@ -87,9 +91,15 @@ lifts shrink a level, and that a full cancel makes the ask widen to the next lev
 
 ## Not done yet
 
-Phase 4: the write-up. **No live data has been collected and there
-are no results.** Everything above is validated against Kalshi's published OpenAPI
-and AsyncAPI specifications plus offline tests, not against live traffic.
+**No live data has been collected, so there are no results.** The pipeline runs end
+to end on generated data and the report generator works, but every number it has
+produced so far is one I put in. Everything is validated against Kalshi's published
+OpenAPI and AsyncAPI specifications plus 11 groups of offline tests, not against
+live traffic.
+
+The gating item is a Kalshi API key. Calibration is the faster path to a genuine
+result, since it reads already-resolved markets from history rather than waiting
+for collection.
 
 ## Limitations I already expect
 
@@ -107,6 +117,11 @@ and AsyncAPI specifications plus offline tests, not against live traffic.
 - **Raw reliability has a noise floor.** It never reaches zero on finite data, so
   comparing it against zero would call an honest market miscalibrated. The code
   computes the floor and reports the excess above it.
+- **Calibration needs more data than it looks.** Significance comes from a
+  simulated null rather than a threshold, and on synthetic data the test needed
+  roughly 1600 single-horizon observations to detect a substantial bias. A null
+  result here will be as much a statement about sample size as about the market,
+  and the report says so in those words.
 - **Fees set the floor, and it is high.** Kalshi charges
   `round_up_to_cent(0.07 * M * C * P * (1 - P))` per leg, peaking at 50c. A
   three-leg partition around 33c each costs about 4.65c per contract to enter

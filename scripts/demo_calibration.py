@@ -24,11 +24,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from fetch_resolved import write as write_observations  # sibling script, same directory
 from kmm.calibration import Observation, brier_decomposition, summarise
 from kmm.plots import horizon_diagram, reliability_diagram
 
 FIGURES = Path(__file__).resolve().parents[1] / "reports" / "figures"
+DEMO_DB = Path(__file__).resolve().parents[1] / "data" / "demo_calibration.sqlite"
 HORIZONS = [0.5, 3, 12, 48, 120, 400]
+RESOLUTION_MS = 1_780_000_000_000  # notional settlement time for the synthetic set
 
 
 def generate(n_events: int, shrink: float, seed: int) -> list[Observation]:
@@ -66,7 +69,11 @@ def generate(n_events: int, shrink: float, seed: int) -> list[Observation]:
                 quoted = min(0.99, max(0.01, base_quote + noise))
                 obs.append(
                     Observation(
-                        ticker=f"EV{e}-M{m}", event_ticker=f"EV{e}", ts_ms=0,
+                        ticker=f"EV{e}-M{m}", event_ticker=f"EV{e}",
+                        # Distinct per horizon. Writing 0 for every row would let
+                        # the (ticker, ts_ms) primary key in calibration_obs
+                        # collapse all six observations of a market into one.
+                        ts_ms=int((RESOLUTION_MS - hours * 3_600_000)),
                         implied_prob=round(quoted, 2),  # whole cents, as Kalshi quotes
                         outcome=outcome, hours_to_resolution=hours,
                     )
@@ -90,6 +97,13 @@ def main() -> None:
     biased = generate(n_events=120, shrink=0.65, seed=4)
 
     print("NOTE: generated data. Any bias shown is bias this script introduced.")
+
+    # Persist the biased set so build_report.py has something to report on. The
+    # biased one rather than the honest one, because a report generator that has
+    # only ever rendered a clean result has not been shown to render anything else.
+    if DEMO_DB.exists():
+        DEMO_DB.unlink()
+    write_observations(DEMO_DB, biased, "DEMO-SYNTHETIC")
     report("honest-quotes", good)
     report("favourite-longshot", biased)
 
