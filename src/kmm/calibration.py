@@ -126,7 +126,15 @@ def reliability_table(obs: list[Observation], n_bins: int = 10) -> list[Bin]:
         group = buckets[idx]
         n = len(group)
         successes = sum(o.outcome for o in group)
-        lo, hi = wilson_interval(successes, n)
+        # Rows are not independent: a market contributes many hourly snapshots and
+        # the markets in one event resolve together. Taking the interval over rows
+        # overstates precision badly, so it is taken over the bin's distinct events,
+        # with the bin's observed frequency applied to that count. This is an
+        # approximation, not an exact clustered interval; the event-aware test is
+        # null_excess_test.
+        n_events = len({o.event_ticker for o in group})
+        events_yes = round(successes / n * n_events)
+        lo, hi = wilson_interval(events_yes, n_events)
         table.append(
             Bin(
                 lo=idx / n_bins, hi=(idx + 1) / n_bins, n=n,

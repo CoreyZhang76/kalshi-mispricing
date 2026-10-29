@@ -18,7 +18,7 @@ is not the same thing as a realised one.
 | 1 | Identify linked market sets and their no-arbitrage rules | done |
 | 2 | Mispricing scanner with fee-aware thresholds, duration tracking | done |
 | 3 | Calibration and Brier score on resolved markets | done |
-| 4 | Report generator and limitations | done (generator); findings pending data |
+| 4 | Report generator and limitations | done; calibration on real data (no detectable miscalibration, 67 events); arbitrage collection too short for findings |
 
 ## Setup
 

@@ -32,6 +32,8 @@ import sys
 import time
 from pathlib import Path
 
+import httpx
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from kmm.auth import KalshiSigner
@@ -125,15 +127,26 @@ async def fetch(series_ticker: str, days: int, db_path: Path, limit_markets: int
                 close_ts = int(datetime.fromisoformat(close_ts.replace("Z", "+00:00")).timestamp())
             if not open_ts or not close_ts:
                 continue
-            try:
-                candles = await rest.get_candlesticks(
-                    series_ticker=market.get("series_ticker") or series_ticker,
-                    ticker=market["ticker"],
-                    start_ts=open_ts, end_ts=close_ts,
-                    period_interval=60,  # hourly: one observation per market per hour
-                )
-            except KalshiRESTError as exc:
-                print(f"  [{i}/{len(markets)}] {market['ticker']}: {exc}")
+            candles = None
+            for attempt in range(1, 4):
+                try:
+                    candles = await rest.get_candlesticks(
+                        series_ticker=market.get("series_ticker") or series_ticker,
+                        ticker=market["ticker"],
+                        start_ts=open_ts, end_ts=close_ts,
+                        period_interval=60,  # hourly: one observation per market per hour
+                    )
+                    break
+                except httpx.TransportError as exc:
+                    # A dropped connection mid-run used to lose the whole fetch, since
+                    # nothing is written until the end. Retry the one market instead.
+                    print(f"  [{i}/{len(markets)}] {market['ticker']}: transport error "
+                          f"({type(exc).__name__}), attempt {attempt}/3")
+                    await asyncio.sleep(2 * attempt)
+                except KalshiRESTError as exc:
+                    print(f"  [{i}/{len(markets)}] {market['ticker']}: {exc}")
+                    break
+            if candles is None:
                 continue
             obs = candles_to_observations(market, candles)
             collected.extend(obs)

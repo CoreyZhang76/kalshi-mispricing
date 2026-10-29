@@ -37,6 +37,20 @@ def _fmt_cents(value) -> str:
     return "-" if value in (None, "") else f"{int(value):>3}c"
 
 
+def _volume(m: dict) -> int:
+    """Contracts traded. The API now returns `volume_fp` as a decimal string."""
+    return int(float(m.get("volume_fp") or m.get("volume") or 0))
+
+
+def _cents_field(m: dict, key: str) -> int | None:
+    """A quoted price in whole cents. The API now returns `<key>_dollars` as a string."""
+    raw = m.get(f"{key}_dollars")
+    if raw in (None, ""):
+        raw = m.get(key)
+        return int(raw) if raw not in (None, "") else None
+    return round(float(raw) * 100)
+
+
 async def list_series(rest: KalshiREST, category: str | None) -> None:
     series = await rest.get_series_list(category)
     by_category: dict[str, list[dict]] = defaultdict(list)
@@ -56,13 +70,13 @@ async def show_series(rest: KalshiREST, series_ticker: str) -> None:
 
     print(f"{len(markets)} open markets across {len(by_event)} events in {series_ticker}\n")
     for event, group in sorted(by_event.items()):
-        volume = sum(int(m.get("volume") or 0) for m in group)
+        volume = sum(_volume(m) for m in group)
         print(f"--- {event}   markets={len(group)}  event_volume={volume:,}")
         for m in sorted(group, key=lambda x: x.get("ticker", "")):
             print(
                 f"    {m.get('ticker'):<34} "
-                f"bid={_fmt_cents(m.get('yes_bid'))} ask={_fmt_cents(m.get('yes_ask'))} "
-                f"vol={int(m.get('volume') or 0):>8,} oi={int(m.get('open_interest') or 0):>8,}  "
+                f"bid={_fmt_cents(_cents_field(m, 'yes_bid'))} ask={_fmt_cents(_cents_field(m, 'yes_ask'))} "
+                f"vol={_volume(m):>8,} oi={int(m.get('open_interest') or 0):>8,}  "
                 f"{str(m.get('yes_sub_title') or m.get('subtitle') or '')[:34]}"
             )
 
@@ -83,11 +97,11 @@ async def candidates(rest: KalshiREST, min_volume: int, min_markets: int, top: i
     for event, group in by_event.items():
         if len(group) < min_markets:
             continue
-        volume = sum(int(m.get("volume") or 0) for m in group)
+        volume = sum(_volume(m) for m in group)
         if volume < min_volume:
             continue
-        quoted = [m for m in group if m.get("yes_bid") and m.get("yes_ask")]
-        spreads = [int(m["yes_ask"]) - int(m["yes_bid"]) for m in quoted]
+        quoted = [(_cents_field(m, "yes_bid"), _cents_field(m, "yes_ask")) for m in group]
+        spreads = [ask - bid for bid, ask in quoted if bid and ask]
         rows.append(
             {
                 "event": event,

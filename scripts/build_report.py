@@ -279,6 +279,10 @@ def calibration_section(obs: list[Observation], synthetic: bool) -> str:
         "",
         reliability_table_markdown(obs),
         "",
+        "The `*` flags are one test per bin, uncorrected for the ten bins looked at, "
+        "so a flag or two is what chance alone produces. They are a pointer to where "
+        "to look, not a finding. The headline test above is the one event-aware test.",
+        "",
         "#### Does it sharpen as resolution approaches?",
         "",
         f"![Score by horizon](figures/report_horizon{suffix}.png)",

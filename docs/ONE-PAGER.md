@@ -1,7 +1,7 @@
 # Kalshi Cross-Market Mispricing Scanner
 
 **Corey Zhang** | [github.com/CoreyZhang76/kalshi-mispricing](https://github.com/CoreyZhang76/kalshi-mispricing)
-Personal project, September 2026. Status: pipeline complete through Phase 4. No live data collected, so there are no findings yet.
+Personal project, October 2026. Status: pipeline complete through Phase 4. Calibration has a real result on 90 days of resolved KXHIGHNY markets (67 independent events): no miscalibration detectable at a 12-hour horizon. Live arbitrage collection has started but has run for under an hour, so there are no arbitrage findings yet.
 
 ---
 
@@ -91,15 +91,17 @@ lifts shrink a level, and that a full cancel makes the ask widen to the next lev
 
 ## Not done yet
 
-**No live data has been collected, so there are no results.** The pipeline runs end
-to end on generated data and the report generator works, but every number it has
-produced so far is one I put in. Everything is validated against Kalshi's published
-OpenAPI and AsyncAPI specifications plus 11 groups of offline tests, not against
-live traffic.
+**Arbitrage has no results yet.** The live collector is running on two linked ladders
+(KXFED-26DEC and KXCPI-26OCT), but it has run for under an hour. The scanner has not
+yet written to the database, because the collector holds it open. Weeks of collection
+are needed before any frequency estimate means anything, and the scanner's
+"no violations" line on that short run is not a finding.
 
-The gating item is a Kalshi API key. Calibration is the faster path to a genuine
-result, since it reads already-resolved markets from history rather than waiting
-for collection.
+**Calibration has a real result, on one series.** It covers 90 days of resolved
+KXHIGHNY markets, 8,682 hourly observations across 357 markets and only 67 independent
+events. At a 12-hour horizon the event-aware null test does not detect miscalibration
+(p = 0.72). That is a null on a small sample, not evidence the market is well
+calibrated, and it says nothing about other series.
 
 ## Limitations I already expect
 
